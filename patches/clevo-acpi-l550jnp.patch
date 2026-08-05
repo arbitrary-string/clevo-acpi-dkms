@@ -37,7 +37,7 @@
  struct clevo_data {
  	struct platform_device *pdev;
  	struct input_dev *input;
-@@ -43,6 +62,7 @@
+@@ -43,20 +62,27 @@
  	u8 kb_brightness;
  	u8 kb_toggle_brightness;
  	u32 kb_color_index;
@@ -45,7 +45,33 @@
  	u8 kbd_type;
  };
  
-@@ -129,26 +149,25 @@
+ static const struct key_entry clevo_keymap[] = {
+ 	// White-only KBD
+-	{ KE_KEY, 0x20, { KEY_KBDILLUMDOWN } },
+-	{ KE_KEY, 0x21, { KEY_KBDILLUMUP } },
+-	{ KE_KEY, 0x3f, { KEY_KBDILLUMTOGGLE } },
++	// Brightness keys reported as KE_IGNORE, not KE_KEY: the EC command
++	// already runs in-kernel (kbled_hotkey_*), so nothing needs to react
++	// to the corresponding evdev key. On GNOME (gsd-power/upower), letting
++	// KEY_KBDILLUM* reach userspace causes it to independently recompute
++	// and rewrite brightness a few ms later based on its own (buggy)
++	// logic, clobbering the correct in-kernel change back to 0.
++	{ KE_IGNORE, 0x20 },			// Brightness down
++	{ KE_IGNORE, 0x21 },			// Brightness up
++	{ KE_IGNORE, 0x3f },			// Brightness toggle
+ 
+ 	// RGB KBD
+-	{ KE_KEY, 0x81, { KEY_KBDILLUMDOWN } },
+-	{ KE_KEY, 0x82, { KEY_KBDILLUMUP } },
++	{ KE_IGNORE, 0x81 },			// Brightness down
++	{ KE_IGNORE, 0x82 },			// Brightness up
+ 	{ KE_IGNORE, 0x83 },			// Color cycle
+-	{ KE_KEY, 0x9f, { KEY_KBDILLUMTOGGLE } },
++	{ KE_IGNORE, 0x9f },			// Brightness toggle
+ 
+ 	{ KE_KEY, 0x5d, { KEY_F21 } },		// Touchpad disable
+ 	{ KE_IGNORE, 0x70 },			// Fan max off (Fn+1)
+@@ -129,26 +155,25 @@
  	return AE_OK;
  }
  
@@ -82,7 +108,7 @@
  	}
  }
  
-@@ -323,7 +342,7 @@
+@@ -323,7 +348,7 @@
  	if (priv->kb_color_index >= ARRAY_SIZE(kb_led_colors))
  		priv->kb_color_index = 0;
  
@@ -91,7 +117,7 @@
  
  	led_classdev_notify_brightness_hw_changed(&priv->kb_led, priv->kb_brightness);
  }
-@@ -368,7 +387,7 @@
+@@ -368,7 +393,7 @@
  	clevo_dchu_cmd(adev->handle, 0x67, 0xE007F001);
  	clevo_kbled_set(&priv->kb_led, priv->kb_brightness);
  	if (priv->kbd_type != 1)
@@ -100,7 +126,7 @@
  
  	return 0;
  }
-@@ -457,7 +476,8 @@
+@@ -457,7 +482,8 @@
  
  	// FIXME: This fixes turning KBLED back on for some reason.
  	// Even on White-only KBLED.
@@ -110,7 +136,7 @@
  
  	return 0;
  }
-@@ -468,6 +488,62 @@
+@@ -468,6 +494,62 @@
  static SIMPLE_DEV_PM_OPS(clevo_acpi_pm, clevo_acpi_suspend, clevo_acpi_resume);
  #endif
  
@@ -173,7 +199,7 @@
  // TODO: Model-specific quirks
  #define SYSTEM76_DMI(version) { \
  		.matches = { \
-@@ -476,6 +552,12 @@
+@@ -476,6 +558,12 @@
  		}, \
  	}
  
@@ -186,7 +212,7 @@
  // XXX: Limit functionality to latest models while drivers are being reworked.
  static const struct dmi_system_id system76_dmi_table[] = {
  	SYSTEM76_DMI("addp6"),
-@@ -484,6 +566,8 @@
+@@ -484,6 +572,8 @@
  	SYSTEM76_DMI("oryp14"),
  	// For testing; model has lightbar
  	//SYSTEM76_DMI("serw14"),
@@ -195,7 +221,7 @@
  	{ }
  
  };
-@@ -552,6 +636,7 @@
+@@ -552,6 +642,7 @@
  	.driver = {
  		.name = "clevo-acpi",
  		.acpi_match_table = clevo_acpi_ids,

@@ -68,15 +68,21 @@ struct clevo_data {
 
 static const struct key_entry clevo_keymap[] = {
 	// White-only KBD
-	{ KE_KEY, 0x20, { KEY_KBDILLUMDOWN } },
-	{ KE_KEY, 0x21, { KEY_KBDILLUMUP } },
-	{ KE_KEY, 0x3f, { KEY_KBDILLUMTOGGLE } },
+	// Brightness keys reported as KE_IGNORE, not KE_KEY: the EC command
+	// already runs in-kernel (kbled_hotkey_*), so nothing needs to react
+	// to the corresponding evdev key. On GNOME (gsd-power/upower), letting
+	// KEY_KBDILLUM* reach userspace causes it to independently recompute
+	// and rewrite brightness a few ms later based on its own (buggy)
+	// logic, clobbering the correct in-kernel change back to 0.
+	{ KE_IGNORE, 0x20 },			// Brightness down
+	{ KE_IGNORE, 0x21 },			// Brightness up
+	{ KE_IGNORE, 0x3f },			// Brightness toggle
 
 	// RGB KBD
-	{ KE_KEY, 0x81, { KEY_KBDILLUMDOWN } },
-	{ KE_KEY, 0x82, { KEY_KBDILLUMUP } },
+	{ KE_IGNORE, 0x81 },			// Brightness down
+	{ KE_IGNORE, 0x82 },			// Brightness up
 	{ KE_IGNORE, 0x83 },			// Color cycle
-	{ KE_KEY, 0x9f, { KEY_KBDILLUMTOGGLE } },
+	{ KE_IGNORE, 0x9f },			// Brightness toggle
 
 	{ KE_KEY, 0x5d, { KEY_F21 } },		// Touchpad disable
 	{ KE_IGNORE, 0x70 },			// Fan max off (Fn+1)
