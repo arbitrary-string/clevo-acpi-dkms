@@ -48,6 +48,17 @@ echo "Reloading clevo_acpi module..."
 sudo rmmod clevo_acpi 2>/dev/null || true
 sudo modprobe clevo_acpi
 
+# Workaround: on this hardware, the automatic cold-boot module load
+# consistently fails clevo_acpi's DMI check (observed across multiple
+# reboots), even though the exact same module reloaded manually right
+# after boot binds correctly every time. A oneshot reload once the system
+# is fully up works around it reliably.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+sudo install -m 0644 "$SCRIPT_DIR/clevo-acpi-reload.service" \
+	/etc/systemd/system/clevo-acpi-reload.service
+sudo systemctl daemon-reload
+sudo systemctl enable clevo-acpi-reload.service
+
 echo
 echo "Driver enabled. Check: ls -la /sys/devices/platform/CLV0001:00/"
 echo "To actually control it (permissions, GUI/CLI, boot persistence), install"
