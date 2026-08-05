@@ -16,18 +16,26 @@ Many of these laptops (System76, and barebones from other resellers built on
 the same Clevo/Tongfang/Uniwill ODM hardware) expose keyboard RGB control
 through an ACPI method (`ECMD`, on the embedded controller) plus a `_DSM`
 method on ACPI device `CLV0001`. System76 publishes an open-source (GPL-2.0)
-driver for exactly this interface, as part of their
-[`system76`](https://github.com/pop-os/system76) package's `clevo-acpi.c`.
+driver for exactly this interface: `clevo-acpi.c` in
+[`pop-os/system76-dkms`](https://github.com/pop-os/system76-dkms) (the
+`system76-dkms` package). Note this file may not be present in whatever
+version of that package your distro/PPA currently serves — it was added
+partway through the project's history, and PPA snapshots have been observed
+to lag behind or roll back past it. `files/clevo-acpi.c` in this repo is our
+own copy, taken directly from that upstream source, so this doesn't depend
+on your local `system76-dkms` source tree already having it.
 
 That driver works great — but it only binds on a hardcoded list of System76
 product codenames (matched via `DMI_SYS_VENDOR == "System76"` plus a specific
 `DMI_PRODUCT_VERSION`). A generic/unbranded barebone reports `sys_vendor:
 Notebook` and a raw board name, so the driver correctly identifies the ACPI
 interface but refuses to attach: `clevo_acpi: model does not utilize this
-driver`. This project patches that whitelist to also match by
-`DMI_BOARD_NAME`, and adds per-zone (left/center/right/numpad/lightbar)
-custom-color sysfs attributes the upstream driver doesn't expose (it only
-cycles through 7 fixed colors via the keyboard's own Fn shortcut).
+driver`. This project adds a `DMI_BOARD_NAME` match to that whitelist, and
+adds per-zone (left/center/right/numpad/lightbar) custom-color sysfs
+attributes the upstream driver doesn't expose (it only cycles through 7
+fixed colors via the keyboard's own Fn shortcut). See
+`patches/clevo-acpi-l550jnp.patch` for exactly what changed, as a diff
+against the unmodified upstream file.
 
 ## Is your board supported?
 
@@ -44,10 +52,11 @@ see `patches/` for boards already added. If yours isn't listed, see
 
 ## Requirements
 
-- Debian/Ubuntu (or similar) with the `system76` DKMS package already
-  installed (`apt install system76-dkms` or via System76's own driver PPA/
-  repo — this project patches their source, it doesn't replace it)
-- `dkms`, `patch`, `sudo`
+- Debian/Ubuntu (or similar) with the `system76-dkms` package already
+  installed (`apt install system76-dkms`, or via System76's own driver PPA/
+  repo — this project deploys our own copy of one file into their source
+  tree, it doesn't replace the package)
+- `dkms`, `sudo`
 
 ## Usage
 
@@ -57,9 +66,11 @@ cd clevo-acpi-dkms
 ./install.sh
 ```
 
-Safe to re-run — skips the patch step if already applied, and always
-re-patches after a `system76` package upgrade overwrites the source under
-`/usr/src`. Rebuilds/reinstalls the DKMS module and reloads it.
+Safe to re-run — deploys `files/clevo-acpi.c` into the local `system76-dkms`
+source tree (overwriting any existing copy, including after a `system76`
+package upgrade replaces the source under `/usr/src`), wires it into
+`Kbuild`/`dkms.conf` if not already present, then rebuilds/reinstalls the
+DKMS module and reloads it.
 
 ## Adding your board
 
@@ -86,15 +97,18 @@ To propose adding yours, open a PR with:
   supported hardware (command `0xCA`, documented zone bytes) — it does not
   add any new/unverified command paths, only widens which boards can reach
   the existing ones.
-- Not affiliated with System76 or TUXEDO Computers. It's a small patch to
-  System76's GPL-licensed source, distributed as a patch (not a fork) so it
-  stays trivial to diff against upstream and re-apply after their updates.
+- Not affiliated with System76 or TUXEDO Computers. It's a small modification
+  to one file of System76's GPL-licensed `system76-dkms` source
+  (`pop-os/system76-dkms`) — see `patches/` for a diff against the
+  unmodified upstream file.
 - Out of scope on purpose: fan curves, power profiles, and other EC
   functionality this driver family also exposes. Keyboard backlight only —
   smaller, easier-to-trust surface area for hardware we haven't tested.
 
 ## License
 
-The patch modifies GPL-2.0-or-later licensed code
-(`system76/clevo-acpi.c`); this repo's own files (patch, install script,
-this README) are likewise GPL-2.0-or-later — see [LICENSE](LICENSE).
+`files/clevo-acpi.c` is a modified copy of GPL-2.0-or-later licensed code
+from [`pop-os/system76-dkms`](https://github.com/pop-os/system76-dkms)
+(`src/clevo-acpi.c`); this repo's own files (that modified copy, the
+reference patch, install script, this README) are likewise
+GPL-2.0-or-later — see [LICENSE](LICENSE).

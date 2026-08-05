@@ -1,22 +1,29 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Applies the L550JNP DMI-whitelist + per-zone RGB patch to the System76
-# `system76` DKMS package's clevo-acpi.c, then rebuilds/reinstalls/reloads
-# the module for the running kernel.
+# Installs the L550JNP-enabled clevo-acpi.c (DMI-whitelist + per-zone RGB)
+# into the System76 `system76` DKMS package's source tree, then rebuilds/
+# reinstalls/reloads the module for the running kernel.
 #
 # This package only enables the kernel driver (the clevo-acpi LED device).
 # For a GUI/CLI to actually control it, with permissions/persistence set up,
 # install the `keyboardcolors` app separately.
 #
-# Safe to re-run: skips the patch step if already applied (e.g. after a
-# `dkms build` triggered by a kernel upgrade already picked it up), and
-# always re-applies after a `system76` package upgrade replaces the source
+# files/clevo-acpi.c is deployed as a complete file, not a patch: the
+# `system76` package's PPA snapshot at any given time may or may not already
+# contain clevo-acpi.c at all (it was added upstream partway through this
+# package's history, and PPA snapshots have been observed to roll backward
+# to versions that predate it) -- rather than depend on a patch applying
+# cleanly against a base file that might not exist, this always deploys our
+# known-good complete file directly. patches/clevo-acpi-l550jnp.patch is kept
+# for reference (it shows exactly what changed relative to upstream) but
+# install.sh no longer depends on it applying.
+#
+# Safe to re-run: overwriting with identical content is a no-op, and it
+# always re-deploys after a `system76` package upgrade replaces the source
 # under /usr/src.
 set -euo pipefail
 
-PATCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/patches"
-PATCH_FILE="$PATCH_DIR/clevo-acpi-l550jnp.patch"
-MARKER="L55xJNP_N_Mx"
+FILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/files"
 KVER="$(uname -r)"
 
 SRC_DIR=$(find /usr/src -maxdepth 1 -type d -name 'system76-[0-9]*' | sort -V | tail -1)
@@ -28,16 +35,16 @@ fi
 PKG_VERSION="$(basename "$SRC_DIR" | sed 's/^system76-//')"
 echo "Using DKMS source: $SRC_DIR (system76 $PKG_VERSION)"
 
-if sudo grep -q "$MARKER" "$SRC_DIR/clevo-acpi.c"; then
-	echo "Patch already applied, skipping patch step."
-else
-	echo "Applying patch..."
-	TMP="$(mktemp -d)"
-	sudo cp "$SRC_DIR/clevo-acpi.c" "$TMP/clevo-acpi.c"
-	sudo chown "$(id -u):$(id -g)" "$TMP/clevo-acpi.c"
-	patch -p1 -d "$TMP" < "$PATCH_FILE"
-	sudo cp "$TMP/clevo-acpi.c" "$SRC_DIR/clevo-acpi.c"
-	rm -rf "$TMP"
+echo "Deploying clevo-acpi.c..."
+sudo cp "$FILES_DIR/clevo-acpi.c" "$SRC_DIR/clevo-acpi.c"
+
+if ! sudo grep -q "clevo-acpi" "$SRC_DIR/Kbuild"; then
+	echo "obj-m += clevo-acpi.o" | sudo tee -a "$SRC_DIR/Kbuild" >/dev/null
+fi
+
+if ! sudo grep -q "clevo-acpi" "$SRC_DIR/dkms.conf"; then
+	printf 'BUILT_MODULE_NAME[1]="clevo-acpi"\nDEST_MODULE_LOCATION[1]="/updates/dkms"\n' \
+		| sudo tee -a "$SRC_DIR/dkms.conf" >/dev/null
 fi
 
 echo "Rebuilding via DKMS for kernel $KVER..."
