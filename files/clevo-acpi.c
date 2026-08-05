@@ -468,6 +468,12 @@ static int clevo_acpi_suspend(struct device *dev)
 {
 	dev_dbg(dev, "suspend\n");
 
+	// Explicitly turn the backlight off via the EC rather than relying on
+	// a sysfs brightness write reaching us beforehand (e.g. from a desktop
+	// environment) -- same reasoning as the FIXME in clevo_acpi_resume().
+	for (int i = 0; i < CLEVO_ZONE_COUNT; i++)
+		clevo_ec_kbd_zone_color_set(i, 0);
+
 	return 0;
 }
 

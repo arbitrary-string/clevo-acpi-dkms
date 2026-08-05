@@ -126,7 +126,20 @@
  
  	return 0;
  }
-@@ -457,7 +482,8 @@
+@@ -443,6 +468,12 @@
+ {
+ 	dev_dbg(dev, "suspend\n");
+ 
++	// Explicitly turn the backlight off via the EC rather than relying on
++	// a sysfs brightness write reaching us beforehand (e.g. from a desktop
++	// environment) -- same reasoning as the FIXME in clevo_acpi_resume().
++	for (int i = 0; i < CLEVO_ZONE_COUNT; i++)
++		clevo_ec_kbd_zone_color_set(i, 0);
++
+ 	return 0;
+ }
+ 
+@@ -457,7 +488,8 @@
  
  	// FIXME: This fixes turning KBLED back on for some reason.
  	// Even on White-only KBLED.
@@ -136,7 +149,7 @@
  
  	return 0;
  }
-@@ -468,6 +494,62 @@
+@@ -468,6 +500,62 @@
  static SIMPLE_DEV_PM_OPS(clevo_acpi_pm, clevo_acpi_suspend, clevo_acpi_resume);
  #endif
  
@@ -199,7 +212,7 @@
  // TODO: Model-specific quirks
  #define SYSTEM76_DMI(version) { \
  		.matches = { \
-@@ -476,6 +558,12 @@
+@@ -476,6 +564,12 @@
  		}, \
  	}
  
@@ -212,7 +225,7 @@
  // XXX: Limit functionality to latest models while drivers are being reworked.
  static const struct dmi_system_id system76_dmi_table[] = {
  	SYSTEM76_DMI("addp6"),
-@@ -484,6 +572,8 @@
+@@ -484,6 +578,8 @@
  	SYSTEM76_DMI("oryp14"),
  	// For testing; model has lightbar
  	//SYSTEM76_DMI("serw14"),
@@ -221,7 +234,7 @@
  	{ }
  
  };
-@@ -552,6 +642,7 @@
+@@ -552,6 +648,7 @@
  	.driver = {
  		.name = "clevo-acpi",
  		.acpi_match_table = clevo_acpi_ids,
