@@ -6,7 +6,7 @@
 #
 # This package only enables the kernel driver (the clevo-acpi LED device).
 # For a GUI/CLI to actually control it, with permissions/persistence set up,
-# install the `keyboardcolors` app separately.
+# install the `clevo-control-panel` app separately.
 #
 # files/clevo-acpi.c is deployed as a complete file, not a patch: the
 # `system76` package's PPA snapshot at any given time may or may not already
@@ -69,4 +69,4 @@ sudo systemctl enable clevo-acpi-reload.service
 echo
 echo "Driver enabled. Check: ls -la /sys/devices/platform/CLV0001:00/"
 echo "To actually control it (permissions, GUI/CLI, boot persistence), install"
-echo "the keyboardcolors app: https://github.com/arbitrary-string/keyboardcolors"
+echo "the clevo-control-panel app: https://github.com/arbitrary-string/clevo-control-panel"

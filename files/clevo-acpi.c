@@ -743,7 +743,7 @@ static const struct attribute_group clevo_battery_group = {
 // mapping below was determined empirically on 2026-08-08 by observing real
 // fan RPM response to sustained CPU load for each value, with the laptop
 // fully cooled down between each isolated test -- see
-// ~/laptopissues/battery-threshold/NOTES.md for the raw data. Values 2, 6,
+// ~/laptopissues/performance-mode/NOTES.md for the raw data. Values 2, 6,
 // and 8 showed some distinct effect during testing but weren't cleanly
 // classified against a real profile name, so they're intentionally not
 // exposed here; add them later if their behavior gets pinned down.
