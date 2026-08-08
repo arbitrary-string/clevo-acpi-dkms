@@ -241,10 +241,96 @@ static bool clevo_dchu_cmd(acpi_handle handle, u8 method_id, u32 data)
 	return false;
 }
 
+// Same DSM call as clevo_dchu_cmd(), but for "get"-style method IDs that
+// return real data rather than echoing the method ID back on success.
+static bool clevo_dchu_cmd_get(acpi_handle handle, u8 method_id, u32 arg,
+			       u32 *result)
+{
+	union acpi_object arg4;
+	union acpi_object req;
+	union acpi_object *obj;
+
+	req.type = ACPI_TYPE_INTEGER;
+	req.integer.value = arg;
+
+	arg4.type = ACPI_TYPE_PACKAGE;
+	arg4.package.count = 1;
+	arg4.package.elements = &req;
+
+	obj = acpi_evaluate_dsm_typed(handle, &dchu_dsm_guid, 0, method_id, &arg4,
+				      ACPI_TYPE_INTEGER);
+	if (!obj)
+		return false;
+
+	*result = (u32)obj->integer.value;
+	ACPI_FREE(obj);
+
+	return true;
+}
+
 // Sets HKDR=1 so NEVT will Notify device
 static bool clevo_enable_notify_events(acpi_handle handle)
 {
 	return clevo_dchu_cmd(handle, 0x46, 0);
+}
+
+// "Flexicharger" battery charge threshold feature (BIOS setting + vendor
+// Windows Control Center software: stop charging at a configurable upper
+// threshold, resume at a configurable lower one, to reduce Li-ion battery
+// wear from staying near 100% or fully depleted for extended periods).
+//
+// Same DCHU DSM interface as the keyboard, different method IDs (0x77 to
+// read, 0x76 to write) -- confirmed against this board's own DSDT
+// (GCMD/SCMD dispatch) to match the "legacy flexicharger" bit layout
+// already reverse-engineered and shipped by TUXEDO Computers' tuxedo-drivers
+// for other Clevo/Tongfang boards: a single packed 32-bit value,
+// end<<16 | start<<8 | status. See ~/laptopissues/battery-threshold/NOTES.md
+// for the full writeup this is based on.
+#define CLEVO_FLEXICHARGER_GET 0x77
+#define CLEVO_FLEXICHARGER_SET 0x76
+
+static bool clevo_flexicharger_read(acpi_handle handle, u8 *start, u8 *end,
+				    u8 *status)
+{
+	u32 data;
+
+	if (!clevo_dchu_cmd_get(handle, CLEVO_FLEXICHARGER_GET, 0, &data))
+		return false;
+
+	if (status)
+		*status = data & 0x01;
+	if (start)
+		*start = (data >> 0x08) & 0xFF;
+	if (end)
+		*end = (data >> 0x10) & 0xFF;
+
+	return true;
+}
+
+// Only one of start/end/status needs to be non-NULL; the others are left
+// at their current value. Mirrors tuxedo-drivers' clevo_legacy_flexicharger_write():
+// thresholds and status are two separate SCMD calls, thresholds first.
+static bool clevo_flexicharger_write(acpi_handle handle, const u8 *start,
+				     const u8 *end, const u8 *status)
+{
+	u8 prev_start, prev_end, prev_status;
+	u8 set_start, set_end, set_status;
+	u32 write_thresholds, write_status;
+
+	if (!clevo_flexicharger_read(handle, &prev_start, &prev_end, &prev_status))
+		return false;
+
+	set_start = start ? *start : prev_start;
+	set_end = end ? *end : prev_end;
+	set_status = status ? *status : prev_status;
+
+	write_thresholds = (0x06 << 0x18) | set_start | (set_end << 0x08);
+	write_status = (0x05 << 0x18) | (set_status & 0x01);
+
+	if (!clevo_dchu_cmd(handle, CLEVO_FLEXICHARGER_SET, write_thresholds))
+		return false;
+
+	return clevo_dchu_cmd(handle, CLEVO_FLEXICHARGER_SET, write_status);
 }
 
 static enum led_brightness clevo_kbled_get(struct led_classdev *led_cdev)
@@ -268,6 +354,8 @@ static int clevo_kbled_set(struct led_classdev *led_cdev,
 	adev = ACPI_COMPANION(&priv->pdev->dev);
 
 	priv->kb_brightness = brightness;
+	if (brightness > 0)
+		priv->kb_toggle_brightness = brightness;
 
 	if (priv->kbd_type == 1)
 		clevo_dchu_cmd(adev->handle, 0x27, priv->kb_brightness);
@@ -491,6 +579,13 @@ static int clevo_acpi_resume(struct device *dev)
 	for (int i = 0; i < CLEVO_ZONE_COUNT; i++)
 		clevo_ec_kbd_zone_color_set(i, priv->kb_zone_color[i]);
 
+	// Some desktop environments (confirmed: GNOME's gsd-power) explicitly
+	// zero the brightness before suspend as a power-saving measure, but
+	// never restore it on resume. Restore it ourselves from the last known
+	// nonzero brightness rather than trusting whatever priv->kb_brightness
+	// currently holds, since that's exactly the value such a write clobbers.
+	clevo_kbled_set(&priv->kb_led, priv->kb_toggle_brightness);
+
 	return 0;
 }
 
@@ -554,7 +649,95 @@ static struct attribute *clevo_kbd_zone_attrs[] = {
 	&dev_attr_color_lightbar.attr,
 	NULL,
 };
-ATTRIBUTE_GROUPS(clevo_kbd_zone);
+static const struct attribute_group clevo_kbd_zone_group = {
+	.attrs = clevo_kbd_zone_attrs,
+};
+
+// Attribute names match tuxedo-drivers' convention (which in turn matches
+// the standard Linux power_supply charge_control_*_threshold interface),
+// so tools that already know that interface (e.g. TLP) work unmodified.
+static ssize_t charge_control_start_threshold_show(struct device *dev,
+						    struct device_attribute *attr,
+						    char *buf)
+{
+	struct acpi_device *adev = ACPI_COMPANION(dev);
+	u8 start;
+
+	if (!clevo_flexicharger_read(adev->handle, &start, NULL, NULL))
+		return -EIO;
+
+	return sysfs_emit(buf, "%u\n", start);
+}
+
+static ssize_t charge_control_start_threshold_store(struct device *dev,
+						     struct device_attribute *attr,
+						     const char *buf, size_t count)
+{
+	struct acpi_device *adev = ACPI_COMPANION(dev);
+	u8 value;
+	int err;
+
+	err = kstrtou8(buf, 10, &value);
+	if (err)
+		return err;
+	if (value < 1 || value > 100)
+		return -EINVAL;
+
+	if (!clevo_flexicharger_write(adev->handle, &value, NULL, NULL))
+		return -EIO;
+
+	return count;
+}
+static DEVICE_ATTR_RW(charge_control_start_threshold);
+
+static ssize_t charge_control_end_threshold_show(struct device *dev,
+						  struct device_attribute *attr,
+						  char *buf)
+{
+	struct acpi_device *adev = ACPI_COMPANION(dev);
+	u8 end;
+
+	if (!clevo_flexicharger_read(adev->handle, NULL, &end, NULL))
+		return -EIO;
+
+	return sysfs_emit(buf, "%u\n", end);
+}
+
+static ssize_t charge_control_end_threshold_store(struct device *dev,
+						   struct device_attribute *attr,
+						   const char *buf, size_t count)
+{
+	struct acpi_device *adev = ACPI_COMPANION(dev);
+	u8 value;
+	int err;
+
+	err = kstrtou8(buf, 10, &value);
+	if (err)
+		return err;
+	if (value < 1 || value > 100)
+		return -EINVAL;
+
+	if (!clevo_flexicharger_write(adev->handle, NULL, &value, NULL))
+		return -EIO;
+
+	return count;
+}
+static DEVICE_ATTR_RW(charge_control_end_threshold);
+
+static struct attribute *clevo_battery_attrs[] = {
+	&dev_attr_charge_control_start_threshold.attr,
+	&dev_attr_charge_control_end_threshold.attr,
+	NULL,
+};
+static const struct attribute_group clevo_battery_group = {
+	.attrs = clevo_battery_attrs,
+};
+
+static const struct attribute_group *clevo_acpi_groups[] = {
+	&clevo_kbd_zone_group,
+	&clevo_battery_group,
+	NULL,
+};
 
 // TODO: Model-specific quirks
 #define SYSTEM76_DMI(version) { \
@@ -648,7 +831,7 @@ static struct platform_driver clevo_acpi_driver = {
 	.driver = {
 		.name = "clevo-acpi",
 		.acpi_match_table = clevo_acpi_ids,
-		.dev_groups = clevo_kbd_zone_groups,
+		.dev_groups = clevo_acpi_groups,
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 17, 0)
 		.pm = pm_sleep_ptr(&clevo_acpi_pm),
