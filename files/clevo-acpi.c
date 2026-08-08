@@ -64,6 +64,7 @@ struct clevo_data {
 	u32 kb_color_index;
 	u32 kb_zone_color[CLEVO_ZONE_COUNT];
 	u8 kbd_type;
+	u8 perf_mode;
 };
 
 static const struct key_entry clevo_keymap[] = {
@@ -733,9 +734,107 @@ static const struct attribute_group clevo_battery_group = {
 	.attrs = clevo_battery_attrs,
 };
 
+// "Performance mode": DCHU function 0x79, sub-command 1 (top byte of the
+// packed ARGS value), takes a 0-8 enum (bottom bytes) that sends a distinct
+// single-bit-flag EC command (0xD7/0x01) and then notifies Intel's IETM/
+// TCPU thermal ACPI objects -- this is what Windows' Control Center calls
+// for its Performance/Balanced/Quiet mode switch (and, for value 1, a
+// fan-boost override). Not vendor-documented anywhere we could find; the
+// mapping below was determined empirically on 2026-08-08 by observing real
+// fan RPM response to sustained CPU load for each value, with the laptop
+// fully cooled down between each isolated test -- see
+// ~/laptopissues/battery-threshold/NOTES.md for the raw data. Values 2, 6,
+// and 8 showed some distinct effect during testing but weren't cleanly
+// classified against a real profile name, so they're intentionally not
+// exposed here; add them later if their behavior gets pinned down.
+//
+// No read-back exists for this (no corresponding GCMD case was found), so
+// unlike the flexicharger attributes above, the "current mode" shown here
+// is only what this driver last set, cached in priv->perf_mode -- not a
+// live hardware read. It defaults to "balanced" on module load, matching
+// the EC's own apparent power-on default observed during testing.
+#define CLEVO_PERF_MODE_SET 0x79
+
+enum clevo_perf_mode {
+	CLEVO_PERF_BALANCED	= 0,
+	CLEVO_PERF_MAX_FAN	= 1,
+	CLEVO_PERF_QUIET	= 5,
+	CLEVO_PERF_PERFORMANCE	= 7,
+};
+
+static const char *clevo_perf_mode_to_name(u8 mode)
+{
+	switch (mode) {
+	case CLEVO_PERF_BALANCED:
+		return "balanced";
+	case CLEVO_PERF_PERFORMANCE:
+		return "performance";
+	case CLEVO_PERF_QUIET:
+		return "quiet";
+	case CLEVO_PERF_MAX_FAN:
+		return "max-fan";
+	default:
+		return "unknown";
+	}
+}
+
+static bool clevo_perf_mode_from_name(const char *name, u8 *mode)
+{
+	if (sysfs_streq(name, "balanced"))
+		*mode = CLEVO_PERF_BALANCED;
+	else if (sysfs_streq(name, "performance"))
+		*mode = CLEVO_PERF_PERFORMANCE;
+	else if (sysfs_streq(name, "quiet"))
+		*mode = CLEVO_PERF_QUIET;
+	else if (sysfs_streq(name, "max-fan"))
+		*mode = CLEVO_PERF_MAX_FAN;
+	else
+		return false;
+
+	return true;
+}
+
+static ssize_t performance_mode_show(struct device *dev,
+				     struct device_attribute *attr, char *buf)
+{
+	struct clevo_data *priv = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%s\n", clevo_perf_mode_to_name(priv->perf_mode));
+}
+
+static ssize_t performance_mode_store(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf, size_t count)
+{
+	struct clevo_data *priv = dev_get_drvdata(dev);
+	struct acpi_device *adev = ACPI_COMPANION(dev);
+	u8 mode;
+
+	if (!clevo_perf_mode_from_name(buf, &mode))
+		return -EINVAL;
+
+	if (!clevo_dchu_cmd(adev->handle, CLEVO_PERF_MODE_SET,
+			    (1U << 24) | mode))
+		return -EIO;
+
+	priv->perf_mode = mode;
+
+	return count;
+}
+static DEVICE_ATTR_RW(performance_mode);
+
+static struct attribute *clevo_perf_attrs[] = {
+	&dev_attr_performance_mode.attr,
+	NULL,
+};
+static const struct attribute_group clevo_perf_group = {
+	.attrs = clevo_perf_attrs,
+};
+
 static const struct attribute_group *clevo_acpi_groups[] = {
 	&clevo_kbd_zone_group,
 	&clevo_battery_group,
+	&clevo_perf_group,
 	NULL,
 };
 
