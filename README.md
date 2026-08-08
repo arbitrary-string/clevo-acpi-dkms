@@ -1,14 +1,17 @@
 # clevo-acpi-dkms
 
-Enables keyboard RGB backlight control on generic Clevo/Tongfang-based
-laptop barebones that System76's `system76` DKMS package doesn't recognize
-yet — because it gates the driver to their own branded models by DMI vendor
+Enables keyboard RGB backlight control, and (on boards whose EC supports it)
+battery charge threshold control, on generic Clevo/Tongfang-based laptop
+barebones that System76's `system76` DKMS package doesn't recognize yet —
+because it gates the driver to their own branded models by DMI vendor
 string, not because the hardware itself is unsupported.
 
-For actually *controlling* the backlight once it's enabled (GUI + CLI,
-permissions, boot persistence), see
-[keyboardcolors](https://github.com/arbitrary-string/keyboardcolors). This
-repo only concerns itself with getting the kernel driver to bind.
+For actually *controlling* these features once the driver is enabled (GUI +
+CLI, permissions, boot persistence), see
+[Clevo Control Panel](https://github.com/arbitrary-string/clevo-control-panel)
+(formerly `keyboardcolors`, renamed when battery threshold support was
+added). This repo only concerns itself with getting the kernel driver to
+bind and exposing the right sysfs attributes.
 
 ## Background
 
@@ -33,9 +36,15 @@ interface but refuses to attach: `clevo_acpi: model does not utilize this
 driver`. This project adds a `DMI_BOARD_NAME` match to that whitelist, and
 adds per-zone (left/center/right/numpad/lightbar) custom-color sysfs
 attributes the upstream driver doesn't expose (it only cycles through 7
-fixed colors via the keyboard's own Fn shortcut). See
-`patches/clevo-acpi-l550jnp.patch` for exactly what changed, as a diff
-against the unmodified upstream file.
+fixed colors via the keyboard's own Fn shortcut). It also adds standard
+`charge_control_start_threshold`/`charge_control_end_threshold` sysfs
+attributes for boards whose EC exposes a "flexicharger"-style battery
+charge threshold feature (same `\_SB.DCHU` ACPI device and `_DSM`
+mechanism as the keyboard, different function indices) — matches the
+convention TUXEDO's `tuxedo-drivers` project uses for other Clevo/Tongfang
+boards, so existing tooling that knows that standard interface (e.g. TLP)
+works unmodified. See `patches/clevo-acpi-l550jnp.patch` for exactly what
+changed, as a diff against the unmodified upstream file.
 
 ## Is your board supported?
 
@@ -93,17 +102,28 @@ To propose adding yours, open a PR with:
 
 ## Safety notes
 
-- This sends the same EC commands System76's own driver already sends on
-  supported hardware (command `0xCA`, documented zone bytes) — it does not
-  add any new/unverified command paths, only widens which boards can reach
-  the existing ones.
+- Keyboard backlight control sends the same EC commands System76's own
+  driver already sends on supported hardware (command `0xCA`, documented
+  zone bytes) — it does not add any new/unverified command paths there,
+  only widens which boards can reach the existing ones.
+- Battery charge threshold control does add a new command path (function
+  indices `0x76`/`0x77` on the same `DCHU` `_DSM` device), not present in
+  upstream System76 code — verified against this board's own DSDT and
+  cross-checked against TUXEDO's independent reverse-engineering of the
+  same mechanism on other Clevo/Tongfang boards before being tested live.
 - Not affiliated with System76 or TUXEDO Computers. It's a small modification
   to one file of System76's GPL-licensed `system76-dkms` source
   (`pop-os/system76-dkms`) — see `patches/` for a diff against the
   unmodified upstream file.
-- Out of scope on purpose: fan curves, power profiles, and other EC
-  functionality this driver family also exposes. Keyboard backlight only —
-  smaller, easier-to-trust surface area for hardware we haven't tested.
+- The battery charge threshold write path (function index `0x76`) uses the
+  same `_DSM`/single-Integer calling convention already validated for the
+  keyboard, and was tested read-only first, then a same-value no-op write,
+  before any real threshold change — see the writeup this is based on at
+  `~/laptopissues/battery-threshold/NOTES.md` (not included in this repo).
+- Still out of scope on purpose: fan curves, power profiles, and other EC
+  functionality this driver family also exposes beyond keyboard backlight
+  and charge thresholds — smaller, easier-to-trust surface area for
+  hardware we haven't tested.
 
 ## License
 
