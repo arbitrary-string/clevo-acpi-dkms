@@ -930,10 +930,22 @@ static s8 clevo_fan_decode_temp_alt(u32 data)
 	return (s8)((data >> 8) & 0xFF);
 }
 
-static bool clevo_fan_present_data(u32 data)
-{
-	return clevo_fan_decode_temp(data) > 1;
-}
+// Fans present on the only board this feature has actually been tested
+// on (L55xJNP): 2 real fan slots (temp2 > 1 on read-back), fan index 2
+// absent. Deliberately NOT probed live via clevo_fan_read() at module
+// load -- an earlier, unrelated incident (see
+// ~/laptopissues/performance-mode/NOTES.md, "Incident (2026-08-08):
+// abrupt shutdown") traced a hard power-off to a reverse-engineered EC
+// command being issued during early boot for the first time, in a less-
+// initialized ACPI/EC state than any prior interactive testing. Rather
+// than risk the same category of problem for a presence *read*, this is
+// just hardcoded, matching how the rest of this driver already treats
+// every DMI-whitelisted board as sharing one EC command family with no
+// per-board runtime detection. TODO: if a whitelisted board with a
+// different fan layout is ever actually validated, revisit -- probing
+// lazily on first real userspace access (never at probe()) rather than
+// reintroducing a probe-time EC call.
+#define CLEVO_FAN_PRESENT_DEFAULT (BIT(CLEVO_FAN0) | BIT(CLEVO_FAN1))
 
 static u8 clevo_fan_percent_to_raw(u8 percent)
 {
@@ -949,24 +961,6 @@ static bool clevo_fan_read(acpi_handle handle, enum clevo_fan_index idx,
 			   u32 *data)
 {
 	return clevo_dchu_cmd_get(handle, clevo_fan_info_cmd[idx], 0, data);
-}
-
-// Called once at probe to find out how many fans this board actually
-// has -- the DMI table below spans several boards, with no guarantee
-// they all share this board's 2-fan layout.
-static void clevo_fan_detect_present(struct clevo_data *priv,
-				     acpi_handle handle)
-{
-	int i;
-
-	priv->fan_present = 0;
-
-	for (i = 0; i < CLEVO_FAN_COUNT; i++) {
-		u32 data;
-
-		if (clevo_fan_read(handle, i, &data) && clevo_fan_present_data(data))
-			priv->fan_present |= BIT(i);
-	}
 }
 
 // Must be called with fan_lock held. SET_FANSPEED_VALUE packs all three
@@ -1341,7 +1335,7 @@ static int clevo_acpi_probe(struct platform_device *pdev)
 	mutex_init(&priv->fan_lock);
 	INIT_DELAYED_WORK(&priv->fan_watchdog_work, clevo_fan_watchdog_work_fn);
 	priv->fan_watchdog_timeout_jiffies = msecs_to_jiffies(CLEVO_FAN_WATCHDOG_DEFAULT_MS);
-	clevo_fan_detect_present(priv, adev->handle);
+	priv->fan_present = CLEVO_FAN_PRESENT_DEFAULT;
 
 	err = clevo_input_init(&pdev->dev);
 	if (err)
@@ -1365,14 +1359,30 @@ static int clevo_acpi_probe(struct platform_device *pdev)
 static void clevo_acpi_remove(struct platform_device *pdev)
 {
 	struct clevo_data *priv = dev_get_drvdata(&pdev->dev);
+	bool manual_active;
 
 	dev_dbg(&pdev->dev, "remove\n");
+
+	mutex_lock(&priv->fan_lock);
+	manual_active = priv->fan_manual_active;
+	mutex_unlock(&priv->fan_lock);
 
 	// Independent safety net alongside fan_release()'s own callers: an
 	// rmmod/DKMS-reinstall cycle (e.g. via install.sh) can never leave a
 	// stale manual fan duty pinned, even if userspace already exited
-	// cleanly for some unrelated reason.
-	clevo_fan_release(priv, ACPI_COMPANION(&pdev->dev)->handle);
+	// cleanly for some unrelated reason. Only actually issues the EC
+	// release command when a manual override was genuinely active --
+	// clevo_acpi_remove() also runs on every ordinary module reload
+	// (clevo-acpi-reload.service's modprobe -r/modprobe cycle early at
+	// boot, well before any userspace daemon could have set anything),
+	// and an unconditional EC write there would be exactly the kind of
+	// early-boot EC command this driver should never issue without
+	// cause -- see the CLEVO_FAN_PRESENT_DEFAULT comment above for the
+	// incident that motivated this.
+	if (manual_active)
+		clevo_fan_release(priv, ACPI_COMPANION(&pdev->dev)->handle);
+	else
+		cancel_delayed_work_sync(&priv->fan_watchdog_work);
 
 	acpi_dev_remove_notify_handler(ACPI_COMPANION(&pdev->dev),
 				       ACPI_ALL_NOTIFY, clevo_acpi_notify);
