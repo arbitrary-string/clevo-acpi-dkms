@@ -3,16 +3,21 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/acpi.h>
+#include <linux/bitops.h>
 #include <linux/dmi.h>
 #include <linux/input.h>
 #include <linux/input/sparse-keymap.h>
+#include <linux/jiffies.h>
+#include <linux/kernel.h>
 #include <linux/kstrtox.h>
 #include <linux/leds.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
 #include <linux/sysfs.h>
 #include <linux/version.h>
+#include <linux/workqueue.h>
 
 // Clevo DCHU DSM UUID: "93f224e4-fbdc-4bbf-add6-db71bdc0afad"
 static const guid_t dchu_dsm_guid =
@@ -55,6 +60,16 @@ static const u8 clevo_kbd_zone_ids[CLEVO_ZONE_COUNT] = {
 	[CLEVO_ZONE_LIGHTBAR] = 0x07,
 };
 
+// Declared here (ahead of struct clevo_data below, which needs
+// CLEVO_FAN_COUNT) even though the rest of the fan control feature lives
+// further down in its own section, alongside the performance-mode block.
+enum clevo_fan_index {
+	CLEVO_FAN0,
+	CLEVO_FAN1,
+	CLEVO_FAN2,
+	CLEVO_FAN_COUNT,
+};
+
 struct clevo_data {
 	struct platform_device *pdev;
 	struct input_dev *input;
@@ -65,6 +80,17 @@ struct clevo_data {
 	u32 kb_zone_color[CLEVO_ZONE_COUNT];
 	u8 kbd_type;
 	u8 perf_mode;
+
+	// Continuous fan duty control -- see the "fan control" section below
+	// for the DCHU commands and the watchdog dead-man's-switch design.
+	// fan_lock is scoped to this subsystem only, not a general driver
+	// lock (kb_zone_color/perf_mode above remain unlocked, as before).
+	struct mutex fan_lock;
+	u8 fan_duty_raw[CLEVO_FAN_COUNT];
+	u8 fan_present;
+	bool fan_manual_active;
+	unsigned long fan_watchdog_timeout_jiffies;
+	struct delayed_work fan_watchdog_work;
 };
 
 static const struct key_entry clevo_keymap[] = {
@@ -555,7 +581,17 @@ static void clevo_acpi_notify(acpi_handle handle, u32 event, void *context)
 
 static int clevo_acpi_suspend(struct device *dev)
 {
+	struct clevo_data *priv = dev_get_drvdata(dev);
+
 	dev_dbg(dev, "suspend\n");
+
+	// Don't let the fan watchdog timer (based on pre-suspend jiffies)
+	// fire mid-suspend or right at resume -- clevo_acpi_resume() below
+	// re-arms it with a fresh timeout if a manual fan override was still
+	// active. This deliberately does NOT release fan control to auto: a
+	// custom fan curve should survive a lid close, not be silently
+	// canceled by it.
+	cancel_delayed_work_sync(&priv->fan_watchdog_work);
 
 	// Explicitly turn the backlight off via the EC rather than relying on
 	// a sysfs brightness write reaching us beforehand (e.g. from a desktop
@@ -586,6 +622,16 @@ static int clevo_acpi_resume(struct device *dev)
 	// nonzero brightness rather than trusting whatever priv->kb_brightness
 	// currently holds, since that's exactly the value such a write clobbers.
 	clevo_kbled_set(&priv->kb_led, priv->kb_toggle_brightness);
+
+	// If a manual fan override was in effect before suspend, give the
+	// userspace daemon (resumed asynchronously by systemd, possibly with
+	// some lag) a full fresh window to notice it's back and resume
+	// petting, rather than trusting stale pre-suspend timing.
+	mutex_lock(&priv->fan_lock);
+	if (priv->fan_manual_active)
+		mod_delayed_work(system_wq, &priv->fan_watchdog_work,
+				 priv->fan_watchdog_timeout_jiffies);
+	mutex_unlock(&priv->fan_lock);
 
 	return 0;
 }
@@ -831,10 +877,411 @@ static const struct attribute_group clevo_perf_group = {
 	.attrs = clevo_perf_attrs,
 };
 
+// Continuous per-fan duty control, distinct from the discrete profiles
+// above. Same DCHU DSM interface, different method IDs -- confirmed
+// against TUXEDO Computers' open-source tuxedo-drivers (clevo_interfaces.h)
+// to be a second, independently-implemented command family on this
+// board's own firmware, not just present on TUXEDO's hardware. Live-tested
+// 2026-08-09: GET_FANINFO* correctly decoded duty/temperature and
+// correctly detected this board only has 2 real fan slots (fan index 2
+// reads back as absent); SET_FANSPEED_VALUE produced an exact,
+// proportional RPM change with temperatures unaffected; SET_FANSPEED_AUTO
+// (0x0F bitmask) returned both fans to normal firmware-auto behavior
+// within seconds. See ~/odm-laptop-research/NOTES.md for the full
+// writeup this is based on.
+#define CLEVO_CMD_GET_FANINFO1 0x63
+#define CLEVO_CMD_GET_FANINFO2 0x64
+#define CLEVO_CMD_GET_FANINFO3 0x6e
+#define CLEVO_CMD_SET_FANSPEED_VALUE 0x68
+#define CLEVO_CMD_SET_FANSPEED_AUTO 0x69
+#define CLEVO_FAN_AUTO_RELEASE_MASK 0x0F
+
+// If nothing pets the watchdog within this many ms of the last manual
+// duty write, clevo_fan_watchdog_work_fn() releases fan control back to
+// firmware auto control on its own, independent of userspace -- a
+// dead-man's-switch so a crashed/killed/hung control daemon can never
+// leave the fan stuck at a stale speed.
+#define CLEVO_FAN_WATCHDOG_MIN_MS 5000
+#define CLEVO_FAN_WATCHDOG_MAX_MS 60000
+#define CLEVO_FAN_WATCHDOG_DEFAULT_MS 15000
+
+static const u8 clevo_fan_info_cmd[CLEVO_FAN_COUNT] = {
+	CLEVO_CMD_GET_FANINFO1,
+	CLEVO_CMD_GET_FANINFO2,
+	CLEVO_CMD_GET_FANINFO3,
+};
+
+// Byte layout of a GET_FANINFO* result: bits 0-7 = live duty (0-255),
+// bits 8-15 = a less reliable temperature reading, bits 16-23 = a more
+// reliable signed temperature reading ("temp2"). A fan slot that doesn't
+// physically exist reads back with temp2 <= 1.
+static u8 clevo_fan_decode_duty(u32 data)
+{
+	return data & 0xFF;
+}
+
+static s8 clevo_fan_decode_temp(u32 data)
+{
+	return (s8)((data >> 16) & 0xFF);
+}
+
+static s8 clevo_fan_decode_temp_alt(u32 data)
+{
+	return (s8)((data >> 8) & 0xFF);
+}
+
+static bool clevo_fan_present_data(u32 data)
+{
+	return clevo_fan_decode_temp(data) > 1;
+}
+
+static u8 clevo_fan_percent_to_raw(u8 percent)
+{
+	return DIV_ROUND_CLOSEST((unsigned int)percent * 0xFF, 100);
+}
+
+static u8 clevo_fan_raw_to_percent(u8 raw)
+{
+	return DIV_ROUND_CLOSEST((unsigned int)raw * 100, 0xFF);
+}
+
+static bool clevo_fan_read(acpi_handle handle, enum clevo_fan_index idx,
+			   u32 *data)
+{
+	return clevo_dchu_cmd_get(handle, clevo_fan_info_cmd[idx], 0, data);
+}
+
+// Called once at probe to find out how many fans this board actually
+// has -- the DMI table below spans several boards, with no guarantee
+// they all share this board's 2-fan layout.
+static void clevo_fan_detect_present(struct clevo_data *priv,
+				     acpi_handle handle)
+{
+	int i;
+
+	priv->fan_present = 0;
+
+	for (i = 0; i < CLEVO_FAN_COUNT; i++) {
+		u32 data;
+
+		if (clevo_fan_read(handle, i, &data) && clevo_fan_present_data(data))
+			priv->fan_present |= BIT(i);
+	}
+}
+
+// Must be called with fan_lock held. SET_FANSPEED_VALUE packs all three
+// fan slots into a single 32-bit argument -- writing just one fan's byte
+// without resending the other two's current value would zero them, so
+// the full packed word is always rebuilt from the cache and sent as one
+// call (also closes the TOCTOU window a separate read-then-write would
+// have against a concurrent writer or the watchdog).
+static bool clevo_fan_apply_locked(struct clevo_data *priv, acpi_handle handle)
+{
+	u32 packed = priv->fan_duty_raw[CLEVO_FAN0] |
+		     (priv->fan_duty_raw[CLEVO_FAN1] << 8) |
+		     (priv->fan_duty_raw[CLEVO_FAN2] << 16);
+
+	return clevo_dchu_cmd(handle, CLEVO_CMD_SET_FANSPEED_VALUE, packed);
+}
+
+// Arms/extends the dead-man's-switch. Must be called with fan_lock held.
+// Lazily started on first use, so a machine that never enables manual
+// fan control never pays any periodic timer cost.
+static void clevo_fan_watchdog_pet_locked(struct clevo_data *priv)
+{
+	priv->fan_manual_active = true;
+	mod_delayed_work(system_wq, &priv->fan_watchdog_work,
+			 priv->fan_watchdog_timeout_jiffies);
+}
+
+// The watchdog timeout callback. Uses delayed_work rather than a plain
+// timer_list, and a mutex rather than a spinlock, because it needs to
+// call clevo_dchu_cmd() -- which sleeps (ACPICA control-method
+// evaluation) -- something a timer_list softirq callback cannot do.
+static void clevo_fan_watchdog_work_fn(struct work_struct *work)
+{
+	struct clevo_data *priv = container_of(to_delayed_work(work),
+					       struct clevo_data,
+					       fan_watchdog_work);
+	struct acpi_device *adev = ACPI_COMPANION(&priv->pdev->dev);
+
+	mutex_lock(&priv->fan_lock);
+	if (!priv->fan_manual_active) {
+		mutex_unlock(&priv->fan_lock);
+		return;
+	}
+	priv->fan_manual_active = false;
+	mutex_unlock(&priv->fan_lock);
+
+	clevo_dchu_cmd(adev->handle, CLEVO_CMD_SET_FANSPEED_AUTO,
+		      CLEVO_FAN_AUTO_RELEASE_MASK);
+	dev_warn(&priv->pdev->dev,
+		"fan watchdog: no heartbeat for %ums, released to firmware auto control\n",
+		jiffies_to_msecs(priv->fan_watchdog_timeout_jiffies));
+}
+
+// Full graceful release: used by the explicit "fan_release" sysfs store,
+// and by the remove()/module-exit path. Cancels the watchdog *outside*
+// the lock -- the work function above wants the same lock, so canceling
+// while holding it risks deadlock -- then always issues the actual EC
+// release call regardless of race outcome, since that call is idempotent
+// and harmless even if the watchdog already fired on its own.
+static void clevo_fan_release(struct clevo_data *priv, acpi_handle handle)
+{
+	mutex_lock(&priv->fan_lock);
+	priv->fan_manual_active = false;
+	mutex_unlock(&priv->fan_lock);
+
+	cancel_delayed_work_sync(&priv->fan_watchdog_work);
+
+	clevo_dchu_cmd(handle, CLEVO_CMD_SET_FANSPEED_AUTO,
+		      CLEVO_FAN_AUTO_RELEASE_MASK);
+}
+
+static ssize_t clevo_fan_duty_show(acpi_handle handle,
+				   enum clevo_fan_index idx, char *buf)
+{
+	u32 data;
+
+	if (!clevo_fan_read(handle, idx, &data))
+		return -EIO;
+
+	return sysfs_emit(buf, "%u\n", clevo_fan_raw_to_percent(clevo_fan_decode_duty(data)));
+}
+
+static ssize_t clevo_fan_temp_show(acpi_handle handle,
+				   enum clevo_fan_index idx, char *buf)
+{
+	u32 data;
+
+	if (!clevo_fan_read(handle, idx, &data))
+		return -EIO;
+
+	return sysfs_emit(buf, "%d\n", clevo_fan_decode_temp(data));
+}
+
+static ssize_t clevo_fan_temp_alt_show(acpi_handle handle,
+				       enum clevo_fan_index idx, char *buf)
+{
+	u32 data;
+
+	if (!clevo_fan_read(handle, idx, &data))
+		return -EIO;
+
+	return sysfs_emit(buf, "%d\n", clevo_fan_decode_temp_alt(data));
+}
+
+static ssize_t clevo_fan_manual_duty_show(struct clevo_data *priv,
+					  enum clevo_fan_index idx, char *buf)
+{
+	u8 raw;
+
+	mutex_lock(&priv->fan_lock);
+	raw = priv->fan_duty_raw[idx];
+	mutex_unlock(&priv->fan_lock);
+
+	return sysfs_emit(buf, "%u\n", clevo_fan_raw_to_percent(raw));
+}
+
+static ssize_t clevo_fan_manual_duty_store(struct clevo_data *priv,
+					   acpi_handle handle,
+					   enum clevo_fan_index idx,
+					   const char *buf, size_t count)
+{
+	u8 percent;
+	int err;
+	bool ok;
+
+	err = kstrtou8(buf, 10, &percent);
+	if (err)
+		return err;
+	if (percent > 100)
+		return -EINVAL;
+
+	mutex_lock(&priv->fan_lock);
+	priv->fan_duty_raw[idx] = clevo_fan_percent_to_raw(percent);
+	ok = clevo_fan_apply_locked(priv, handle);
+	if (ok)
+		clevo_fan_watchdog_pet_locked(priv);
+	mutex_unlock(&priv->fan_lock);
+
+	if (!ok)
+		return -EIO;
+
+	return count;
+}
+
+#define CLEVO_FAN_INFO_ATTR(_name, _idx, _field)				\
+static ssize_t _name##_show(struct device *dev,				\
+			     struct device_attribute *attr, char *buf)		\
+{										\
+	struct acpi_device *adev = ACPI_COMPANION(dev);			\
+	return clevo_fan_##_field##_show(adev->handle, _idx, buf);		\
+}										\
+static DEVICE_ATTR_RO(_name)
+
+CLEVO_FAN_INFO_ATTR(fan1_duty, CLEVO_FAN0, duty);
+CLEVO_FAN_INFO_ATTR(fan2_duty, CLEVO_FAN1, duty);
+CLEVO_FAN_INFO_ATTR(fan3_duty, CLEVO_FAN2, duty);
+CLEVO_FAN_INFO_ATTR(fan1_temp, CLEVO_FAN0, temp);
+CLEVO_FAN_INFO_ATTR(fan2_temp, CLEVO_FAN1, temp);
+CLEVO_FAN_INFO_ATTR(fan3_temp, CLEVO_FAN2, temp);
+CLEVO_FAN_INFO_ATTR(fan1_temp_alt, CLEVO_FAN0, temp_alt);
+CLEVO_FAN_INFO_ATTR(fan2_temp_alt, CLEVO_FAN1, temp_alt);
+CLEVO_FAN_INFO_ATTR(fan3_temp_alt, CLEVO_FAN2, temp_alt);
+
+#define CLEVO_FAN_MANUAL_DUTY_ATTR(_name, _idx)				\
+static ssize_t _name##_show(struct device *dev,				\
+			     struct device_attribute *attr, char *buf)		\
+{										\
+	return clevo_fan_manual_duty_show(dev_get_drvdata(dev), _idx, buf);	\
+}										\
+static ssize_t _name##_store(struct device *dev,				\
+			      struct device_attribute *attr,			\
+			      const char *buf, size_t count)			\
+{										\
+	struct clevo_data *priv = dev_get_drvdata(dev);			\
+	struct acpi_device *adev = ACPI_COMPANION(dev);			\
+	return clevo_fan_manual_duty_store(priv, adev->handle, _idx, buf, count); \
+}										\
+static DEVICE_ATTR_RW(_name)
+
+CLEVO_FAN_MANUAL_DUTY_ATTR(fan1_manual_duty, CLEVO_FAN0);
+CLEVO_FAN_MANUAL_DUTY_ATTR(fan2_manual_duty, CLEVO_FAN1);
+CLEVO_FAN_MANUAL_DUTY_ATTR(fan3_manual_duty, CLEVO_FAN2);
+
+static ssize_t fan_manual_active_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	struct clevo_data *priv = dev_get_drvdata(dev);
+	bool active;
+
+	mutex_lock(&priv->fan_lock);
+	active = priv->fan_manual_active;
+	mutex_unlock(&priv->fan_lock);
+
+	return sysfs_emit(buf, "%u\n", active ? 1 : 0);
+}
+static DEVICE_ATTR_RO(fan_manual_active);
+
+static ssize_t fan_watchdog_timeout_ms_show(struct device *dev,
+					    struct device_attribute *attr,
+					    char *buf)
+{
+	struct clevo_data *priv = dev_get_drvdata(dev);
+	unsigned int ms;
+
+	mutex_lock(&priv->fan_lock);
+	ms = jiffies_to_msecs(priv->fan_watchdog_timeout_jiffies);
+	mutex_unlock(&priv->fan_lock);
+
+	return sysfs_emit(buf, "%u\n", ms);
+}
+
+static ssize_t fan_watchdog_timeout_ms_store(struct device *dev,
+					     struct device_attribute *attr,
+					     const char *buf, size_t count)
+{
+	struct clevo_data *priv = dev_get_drvdata(dev);
+	unsigned int ms;
+	int err;
+
+	err = kstrtouint(buf, 10, &ms);
+	if (err)
+		return err;
+	if (ms < CLEVO_FAN_WATCHDOG_MIN_MS || ms > CLEVO_FAN_WATCHDOG_MAX_MS)
+		return -EINVAL;
+
+	mutex_lock(&priv->fan_lock);
+	priv->fan_watchdog_timeout_jiffies = msecs_to_jiffies(ms);
+	mutex_unlock(&priv->fan_lock);
+
+	return count;
+}
+static DEVICE_ATTR_RW(fan_watchdog_timeout_ms);
+
+static ssize_t fan_watchdog_ping_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	struct clevo_data *priv = dev_get_drvdata(dev);
+
+	mutex_lock(&priv->fan_lock);
+	if (priv->fan_manual_active)
+		clevo_fan_watchdog_pet_locked(priv);
+	mutex_unlock(&priv->fan_lock);
+
+	return count;
+}
+static DEVICE_ATTR_WO(fan_watchdog_ping);
+
+static ssize_t fan_release_store(struct device *dev,
+				 struct device_attribute *attr,
+				 const char *buf, size_t count)
+{
+	struct clevo_data *priv = dev_get_drvdata(dev);
+	struct acpi_device *adev = ACPI_COMPANION(dev);
+
+	clevo_fan_release(priv, adev->handle);
+
+	return count;
+}
+static DEVICE_ATTR_WO(fan_release);
+
+static struct attribute *clevo_fan_attrs[] = {
+	&dev_attr_fan1_duty.attr,
+	&dev_attr_fan2_duty.attr,
+	&dev_attr_fan3_duty.attr,
+	&dev_attr_fan1_temp.attr,
+	&dev_attr_fan2_temp.attr,
+	&dev_attr_fan3_temp.attr,
+	&dev_attr_fan1_temp_alt.attr,
+	&dev_attr_fan2_temp_alt.attr,
+	&dev_attr_fan3_temp_alt.attr,
+	&dev_attr_fan1_manual_duty.attr,
+	&dev_attr_fan2_manual_duty.attr,
+	&dev_attr_fan3_manual_duty.attr,
+	&dev_attr_fan_manual_active.attr,
+	&dev_attr_fan_watchdog_timeout_ms.attr,
+	&dev_attr_fan_watchdog_ping.attr,
+	&dev_attr_fan_release.attr,
+	NULL,
+};
+
+// Hides the per-fan attributes for slots this specific board doesn't
+// have -- the DMI table below spans several boards, not all necessarily
+// sharing this board's 2-fan layout. The always-present control
+// attributes (fan_manual_active, watchdog, release) are never hidden;
+// only the first 12 positions (3 fans x {duty, temp, temp_alt,
+// manual_duty}) are gated per-fan.
+static umode_t clevo_fan_attr_is_visible(struct kobject *kobj,
+					 struct attribute *attr, int n)
+{
+	struct clevo_data *priv = dev_get_drvdata(kobj_to_dev(kobj));
+	static const enum clevo_fan_index per_fan_attr_index[] = {
+		CLEVO_FAN0, CLEVO_FAN1, CLEVO_FAN2, // duty
+		CLEVO_FAN0, CLEVO_FAN1, CLEVO_FAN2, // temp
+		CLEVO_FAN0, CLEVO_FAN1, CLEVO_FAN2, // temp_alt
+		CLEVO_FAN0, CLEVO_FAN1, CLEVO_FAN2, // manual_duty
+	};
+
+	if (n < ARRAY_SIZE(per_fan_attr_index) &&
+	    !(priv->fan_present & BIT(per_fan_attr_index[n])))
+		return 0;
+
+	return attr->mode;
+}
+
+static const struct attribute_group clevo_fan_group = {
+	.attrs = clevo_fan_attrs,
+	.is_visible = clevo_fan_attr_is_visible,
+};
+
 static const struct attribute_group *clevo_acpi_groups[] = {
 	&clevo_kbd_zone_group,
 	&clevo_battery_group,
 	&clevo_perf_group,
+	&clevo_fan_group,
 	NULL,
 };
 
@@ -891,6 +1338,11 @@ static int clevo_acpi_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, priv);
 	priv->pdev = pdev;
 
+	mutex_init(&priv->fan_lock);
+	INIT_DELAYED_WORK(&priv->fan_watchdog_work, clevo_fan_watchdog_work_fn);
+	priv->fan_watchdog_timeout_jiffies = msecs_to_jiffies(CLEVO_FAN_WATCHDOG_DEFAULT_MS);
+	clevo_fan_detect_present(priv, adev->handle);
+
 	err = clevo_input_init(&pdev->dev);
 	if (err)
 		return err;
@@ -912,7 +1364,15 @@ static int clevo_acpi_probe(struct platform_device *pdev)
 
 static void clevo_acpi_remove(struct platform_device *pdev)
 {
+	struct clevo_data *priv = dev_get_drvdata(&pdev->dev);
+
 	dev_dbg(&pdev->dev, "remove\n");
+
+	// Independent safety net alongside fan_release()'s own callers: an
+	// rmmod/DKMS-reinstall cycle (e.g. via install.sh) can never leave a
+	// stale manual fan duty pinned, even if userspace already exited
+	// cleanly for some unrelated reason.
+	clevo_fan_release(priv, ACPI_COMPANION(&pdev->dev)->handle);
 
 	acpi_dev_remove_notify_handler(ACPI_COMPANION(&pdev->dev),
 				       ACPI_ALL_NOTIFY, clevo_acpi_notify);
@@ -943,4 +1403,4 @@ module_platform_driver(clevo_acpi_driver);
 
 MODULE_DESCRIPTION("Clevo ACPI driver");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("0.1.0");
+MODULE_VERSION("0.2.0");

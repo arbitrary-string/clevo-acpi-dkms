@@ -120,10 +120,28 @@ To propose adding yours, open a PR with:
   keyboard, and was tested read-only first, then a same-value no-op write,
   before any real threshold change — see the writeup this is based on at
   `~/laptopissues/battery-threshold/NOTES.md` (not included in this repo).
-- Still out of scope on purpose: fan curves, power profiles, and other EC
-  functionality this driver family also exposes beyond keyboard backlight
-  and charge thresholds — smaller, easier-to-trust surface area for
-  hardware we haven't tested.
+- Fan control (function indices `0x63`/`0x64`/`0x6e` to read per-fan duty
+  and temperature, `0x68` to set a continuous manual duty, `0x69` to
+  release back to firmware auto control) was added after being validated
+  live on this exact board: read-back correctly decoded duty/temperature
+  and correctly identified this board as having only 2 real fan slots; a
+  manual duty write produced the expected proportional RPM change with
+  temperatures unaffected (confirming a direct fan-speed effect, not a
+  side effect of a thermal/power-state change); and release back to
+  firmware auto control was confirmed complete within seconds — see
+  `~/odm-laptop-research/NOTES.md` for the full writeup. A kernel-internal
+  dead-man's-switch (`fan_watchdog_timeout_ms`/`fan_watchdog_ping`/
+  `fan_release`) forces release-to-auto if userspace stops actively
+  renewing a manual override — confirmed live, including the case of an
+  uncatchably killed (`SIGKILL`) controlling process, so a crashed or
+  killed control daemon can never leave the fan stuck at a stale speed.
+- Still out of scope on purpose: a second, separate command (`0x79`
+  sub-command `0x19`, a quiet/power_saving/performance/entertainment
+  scheme distinct from the sub-command `1` the existing
+  `performance_mode` attribute uses) was found to have a real, distinct
+  effect during the same investigation, but hasn't been characterized
+  well enough yet to trust, and conceptually overlaps with
+  `performance_mode` — not exposed as a driver attribute.
 
 ## License
 
