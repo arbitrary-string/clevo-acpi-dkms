@@ -1,55 +1,38 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Installs the L550JNP-enabled clevo-acpi.c (DMI-whitelist + per-zone RGB)
-# into the System76 `system76` DKMS package's source tree, then rebuilds/
-# reinstalls/reloads the module for the running kernel.
+# Builds and installs this repo's driver directly via DKMS -- no separate
+# system76-dkms apt/PPA package needed. This repo is a full merge of
+# pop-os/system76-dkms with clevo-acpi.c's DMI whitelist extended for
+# generic/rebranded Clevo/Tongfang barebones alongside System76's own
+# branded models (see README for the list and how to add yours).
 #
 # This package only enables the kernel driver (the clevo-acpi LED device).
 # For a GUI/CLI to actually control it, with permissions/persistence set up,
 # install the `clevo-control-panel` app separately.
 #
-# files/clevo-acpi.c is deployed as a complete file, not a patch: the
-# `system76` package's PPA snapshot at any given time may or may not already
-# contain clevo-acpi.c at all (it was added upstream partway through this
-# package's history, and PPA snapshots have been observed to roll backward
-# to versions that predate it) -- rather than depend on a patch applying
-# cleanly against a base file that might not exist, this always deploys our
-# known-good complete file directly. patches/clevo-acpi-l550jnp.patch is kept
-# for reference (it shows exactly what changed relative to upstream) but
-# install.sh no longer depends on it applying.
-#
-# Safe to re-run: overwriting with identical content is a no-op, and it
-# always re-deploys after a `system76` package upgrade replaces the source
-# under /usr/src.
+# Safe to re-run.
 set -euo pipefail
 
-FILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/files"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KVER="$(uname -r)"
+PKG_NAME="clevo-acpi"
+PKG_VERSION="$(sed -n 's/^PACKAGE_VERSION="\(.*\)"$/\1/p' "$SCRIPT_DIR/dkms.conf")"
+DKMS_SRC_DIR="/usr/src/${PKG_NAME}-${PKG_VERSION}"
 
-SRC_DIR=$(find /usr/src -maxdepth 1 -type d -name 'system76-[0-9]*' | sort -V | tail -1)
-if [ -z "$SRC_DIR" ]; then
-	echo "error: no /usr/src/system76-* DKMS source tree found (is the 'system76' package installed?)" >&2
-	exit 1
-fi
+echo "Installing source to $DKMS_SRC_DIR..."
+sudo rm -rf "$DKMS_SRC_DIR"
+sudo mkdir -p "$DKMS_SRC_DIR"
+git -C "$SCRIPT_DIR" archive HEAD | sudo tar -x -C "$DKMS_SRC_DIR"
 
-PKG_VERSION="$(basename "$SRC_DIR" | sed 's/^system76-//')"
-echo "Using DKMS source: $SRC_DIR (system76 $PKG_VERSION)"
+# Remove any prior registration of this exact name/version first: dkms
+# keys off name+version, not file contents, so re-running this script
+# after local source edits would otherwise silently reuse a stale build.
+sudo dkms remove -m "$PKG_NAME" -v "$PKG_VERSION" --all 2>/dev/null || true
 
-echo "Deploying clevo-acpi.c..."
-sudo cp "$FILES_DIR/clevo-acpi.c" "$SRC_DIR/clevo-acpi.c"
-
-if ! sudo grep -q "clevo-acpi" "$SRC_DIR/Kbuild"; then
-	echo "obj-m += clevo-acpi.o" | sudo tee -a "$SRC_DIR/Kbuild" >/dev/null
-fi
-
-if ! sudo grep -q "clevo-acpi" "$SRC_DIR/dkms.conf"; then
-	printf 'BUILT_MODULE_NAME[1]="clevo-acpi"\nDEST_MODULE_LOCATION[1]="/updates/dkms"\n' \
-		| sudo tee -a "$SRC_DIR/dkms.conf" >/dev/null
-fi
-
-echo "Rebuilding via DKMS for kernel $KVER..."
-sudo dkms build -m system76 -v "$PKG_VERSION" -k "$KVER" --force
-sudo dkms install -m system76 -v "$PKG_VERSION" -k "$KVER" --force
+echo "Registering and building via DKMS for kernel $KVER..."
+sudo dkms add -m "$PKG_NAME" -v "$PKG_VERSION"
+sudo dkms build -m "$PKG_NAME" -v "$PKG_VERSION" -k "$KVER"
+sudo dkms install -m "$PKG_NAME" -v "$PKG_VERSION" -k "$KVER" --force
 
 echo "Reloading clevo_acpi module..."
 sudo rmmod clevo_acpi 2>/dev/null || true
@@ -60,7 +43,6 @@ sudo modprobe clevo_acpi
 # reboots), even though the exact same module reloaded manually right
 # after boot binds correctly every time. A oneshot reload once the system
 # is fully up works around it reliably.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 sudo install -m 0644 "$SCRIPT_DIR/clevo-acpi-reload.service" \
 	/etc/systemd/system/clevo-acpi-reload.service
 sudo systemctl daemon-reload

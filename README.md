@@ -1,10 +1,11 @@
 # clevo-acpi-dkms
 
 Enables keyboard RGB backlight control, and (on boards whose EC supports it)
-battery charge threshold control, on generic Clevo/Tongfang-based laptop
-barebones that System76's `system76` DKMS package doesn't recognize yet —
-because it gates the driver to their own branded models by DMI vendor
-string, not because the hardware itself is unsupported.
+battery charge threshold, performance/fan mode, and continuous fan-curve
+control, on generic Clevo/Tongfang-based laptop barebones that System76's
+`system76` DKMS package doesn't recognize yet — because it gates the driver
+to their own branded models by DMI vendor string, not because the hardware
+itself is unsupported.
 
 For actually *controlling* these features once the driver is enabled (GUI +
 CLI, permissions, boot persistence), see
@@ -13,20 +14,23 @@ CLI, permissions, boot persistence), see
 added). This repo only concerns itself with getting the kernel driver to
 bind and exposing the right sysfs attributes.
 
+**This repo is a full merge of
+[`pop-os/system76-dkms`](https://github.com/pop-os/system76-dkms)'s
+history**, not just a single patched file — `git clone` this repo and run
+`./install.sh` and you have everything needed to build and install,
+including on a board this project doesn't recognize (it'll just skip the
+generic-barebone whitelist and behave exactly like upstream). No System76
+apt repo/PPA to add or remove, no risk of pulling in unrelated package/kernel
+upgrades just to satisfy one dependency.
+
 ## Background
 
 Many of these laptops (System76, and barebones from other resellers built on
 the same Clevo/Tongfang/Uniwill ODM hardware) expose keyboard RGB control
 through an ACPI method (`ECMD`, on the embedded controller) plus a `_DSM`
 method on ACPI device `CLV0001`. System76 publishes an open-source (GPL-2.0)
-driver for exactly this interface: `clevo-acpi.c` in
-[`pop-os/system76-dkms`](https://github.com/pop-os/system76-dkms) (the
-`system76-dkms` package). Note this file may not be present in whatever
-version of that package your distro/PPA currently serves — it was added
-partway through the project's history, and PPA snapshots have been observed
-to lag behind or roll back past it. `files/clevo-acpi.c` in this repo is our
-own copy, taken directly from that upstream source, so this doesn't depend
-on your local `system76-dkms` source tree already having it.
+driver for exactly this interface: `clevo-acpi.c`, part of the
+`system76-dkms` package this repo is built from.
 
 That driver works great — but it only binds on a hardcoded list of System76
 product codenames (matched via `DMI_SYS_VENDOR == "System76"` plus a specific
@@ -43,8 +47,13 @@ charge threshold feature (same `\_SB.DCHU` ACPI device and `_DSM`
 mechanism as the keyboard, different function indices) — matches the
 convention TUXEDO's `tuxedo-drivers` project uses for other Clevo/Tongfang
 boards, so existing tooling that knows that standard interface (e.g. TLP)
-works unmodified. See `patches/clevo-acpi-l550jnp.patch` for exactly what
-changed, as a diff against the unmodified upstream file.
+works unmodified; a `performance_mode` attribute (quiet/balanced/
+performance/max-fan); and continuous per-fan duty control with a
+kernel-side watchdog dead-man's-switch (see "Safety notes" below). All of
+this only lives in `src/clevo-acpi.c` — everything else merged in from
+upstream (`system76.c`, keyboard/AP-LED handling for real System76
+hardware, etc.) is untouched. `git log -- src/clevo-acpi.c` shows exactly
+what changed and when, against the real upstream history.
 
 ## Is your board supported?
 
@@ -56,16 +65,17 @@ cat /sys/class/dmi/id/board_name           # note this exact string
 ```
 
 If `CLV0001` exists, your EC almost certainly speaks the same protocol —
-see `patches/` for boards already added. If yours isn't listed, see
-"Adding your board" below before assuming it won't work.
+see the DMI whitelist in `src/clevo-acpi.c` for boards already added. If
+yours isn't listed, see "Adding your board" below before assuming it
+won't work.
 
 ## Requirements
 
-- Debian/Ubuntu (or similar) with the `system76-dkms` package already
-  installed (`apt install system76-dkms`, or via System76's own driver PPA/
-  repo — this project deploys our own copy of one file into their source
-  tree, it doesn't replace the package)
-- `dkms`, `sudo`
+- Debian/Ubuntu (or similar), with `dkms`, `git`, and a kernel headers/
+  build-tools set matching your running kernel (`linux-headers-$(uname -r)`
+  on Debian/Ubuntu) already installed. No System76 apt repo/PPA needed —
+  this repo builds and installs the whole driver package itself.
+- `sudo`
 
 ## Usage
 
@@ -75,11 +85,13 @@ cd clevo-acpi-dkms
 ./install.sh
 ```
 
-Safe to re-run — deploys `files/clevo-acpi.c` into the local `system76-dkms`
-source tree (overwriting any existing copy, including after a `system76`
-package upgrade replaces the source under `/usr/src`), wires it into
-`Kbuild`/`dkms.conf` if not already present, then rebuilds/reinstalls the
-DKMS module and reloads it.
+Safe to re-run. Exports this repo's tracked source into
+`/usr/src/clevo-acpi-<version>/` (a name that can never collide with a real
+`system76-dkms` apt install, if you happen to have one), registers and
+builds it with DKMS under its own package name, and reloads the module.
+Re-running after local source edits picks them up (it removes any prior
+DKMS registration under the same name/version first, since DKMS keys off
+name+version, not file contents).
 
 ## Adding your board
 
@@ -111,10 +123,11 @@ To propose adding yours, open a PR with:
   upstream System76 code — verified against this board's own DSDT and
   cross-checked against TUXEDO's independent reverse-engineering of the
   same mechanism on other Clevo/Tongfang boards before being tested live.
-- Not affiliated with System76 or TUXEDO Computers. It's a small modification
-  to one file of System76's GPL-licensed `system76-dkms` source
-  (`pop-os/system76-dkms`) — see `patches/` for a diff against the
-  unmodified upstream file.
+- Not affiliated with System76 or TUXEDO Computers. This repo is a full
+  merge of System76's GPL-licensed `system76-dkms` source
+  (`pop-os/system76-dkms`), with changes scoped to `src/clevo-acpi.c` only
+  — `git log -- src/clevo-acpi.c` shows exactly what changed against the
+  real upstream history.
 - The battery charge threshold write path (function index `0x76`) uses the
   same `_DSM`/single-Integer calling convention already validated for the
   keyboard, and was tested read-only first, then a same-value no-op write,
@@ -145,8 +158,7 @@ To propose adding yours, open a PR with:
 
 ## License
 
-`files/clevo-acpi.c` is a modified copy of GPL-2.0-or-later licensed code
-from [`pop-os/system76-dkms`](https://github.com/pop-os/system76-dkms)
-(`src/clevo-acpi.c`); this repo's own files (that modified copy, the
-reference patch, install script, this README) are likewise
-GPL-2.0-or-later — see [LICENSE](LICENSE).
+This repo is a full merge of GPL-2.0-or-later licensed code from
+[`pop-os/system76-dkms`](https://github.com/pop-os/system76-dkms); this
+project's own additions (the `src/clevo-acpi.c` changes, `install.sh`,
+this README) are likewise GPL-2.0-or-later — see [LICENSE](LICENSE).
