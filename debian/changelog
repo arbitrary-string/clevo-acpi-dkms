@@ -1,0 +1,158 @@
+system76-dkms (1.0.22) jammy; urgency=medium
+
+  * Add gaze20
+
+ -- Jeremy Soller <jeremy@system76.com>  Fri, 16 Jan 2026 12:18:20 -0700
+
+system76-dkms (1.0.21) jammy; urgency=medium
+
+  * Add oryp13
+
+ -- Tim Crawford <tcrawford@system76.com>  Tue, 16 Sep 2025 13:04:08 -0600
+
+system76-dkms (1.0.20) focal; urgency=medium
+
+  * Refactor code
+  * Add addw5
+
+ -- Jeremy Soller <jeremy@system76.com>  Tue, 01 Jul 2025 11:27:12 -0600
+
+system76-dkms (1.0.19) focal; urgency=medium
+
+  * Add serw14
+
+ -- Tim Crawford <tcrawford@system76.com>  Thu, 05 Jun 2025 17:27:15 -0600
+
+system76-dkms (1.0.18) focal; urgency=medium
+
+  * Add bonw16
+
+ -- Jeremy Soller <jeremy@system76.com>  Thu, 27 Mar 2025 15:04:41 -0600
+
+system76-dkms (1.0.17) focal; urgency=medium
+
+  * Fix building on Linux 6.12
+
+ -- Tim Crawford <tcrawford@system76.com>  Fri, 20 Dec 2024 08:43:43 -0700
+
+system76-dkms (1.0.16) focal; urgency=medium
+
+  * Fix build with Linux 6.11
+
+ -- Jeremy Soller <jeremy@system76.com>  Thu, 10 Oct 2024 13:57:05 -0600
+
+system76-dkms (1.0.15) focal; urgency=medium
+
+  * Fix bonw13 backlight control
+
+ -- Tim Crawford <tcrawford@system76.com>  Wed, 12 Jun 2024 14:47:40 -0600
+
+system76-dkms (1.0.14) focal; urgency=medium
+
+  * Add kudu6
+
+ -- Tim Crawford <tcrawford@system76.com>  Thu, 04 Nov 2021 10:27:14 -0600
+
+system76-dkms (1.0.13) focal; urgency=medium
+
+  * Fix module load on galp3
+  * Fix serval keyboard backlights
+  * Add pang11
+
+ -- Tim Crawford <tcrawford@system76.com>  Fri, 06 Aug 2021 07:10:13 -0600
+
+system76-dkms (1.0.12) focal; urgency=medium
+
+  * Use WMI event for airplane mode on pang10
+
+ -- Tim Crawford <tcrawford@system76.com>  Mon, 11 Jan 2021 12:36:39 -0700
+
+system76-dkms (1.0.11) focal; urgency=medium
+
+  * Use WMI event for airplane mode on serw12
+
+ -- Jeremy Soller <jeremy@system76.com>  Tue, 24 Nov 2020 10:06:28 -0700
+
+system76-dkms (1.0.10) focal; urgency=medium
+
+  * Add pang10
+
+ -- Jeremy Soller <jeremy@system76.com>  Tue, 10 Nov 2020 20:03:14 -0700
+
+system76-dkms (1.0.9) bionic; urgency=medium
+
+  * Add oryp6
+
+ -- Tim Crawford <tcrawford@system76.com>  Mon, 08 Jun 2020 10:28:24 -0600
+
+system76-dkms (1.0.8) bionic; urgency=medium
+
+  * Add addw2 and gaze15
+
+ -- Jeremy Soller <jeremy@system76.com>  Wed, 22 Apr 2020 20:42:40 -0600
+
+system76-dkms (1.0.7) bionic; urgency=medium
+
+  * Add serw12
+
+ -- Jeremy Soller <jeremy@system76.com>  Mon, 13 Apr 2020 21:29:36 -0600
+
+system76-dkms (1.0.6) bionic; urgency=medium
+
+  * Add DRIVER_KB_LED to darp5
+
+ -- Jeremy Soller <jeremy@system76.com>  Tue, 06 Aug 2019 07:27:49 -0600
+
+system76-dkms (1.0.5) bionic; urgency=medium
+
+  * Add OLED support
+
+ -- Jeremy Soller <jeremy@system76.com>  Wed, 24 Jul 2019 13:07:22 -0600
+
+system76-dkms (1.0.4) bionic; urgency=medium
+
+  * Add serw11-b
+
+ -- Jeremy Soller <jeremy@system76.com>  Wed, 06 Feb 2019 10:33:59 -0700
+
+system76-dkms (1.0.3) bionic; urgency=medium
+
+  * Add oryp5
+
+ -- Jeremy Soller <jeremy@system76.com>  Tue, 29 Jan 2019 14:29:54 -0700
+
+system76-dkms (1.0.2) bionic; urgency=medium
+
+  * Add darp5
+
+ -- Jeremy Soller <jeremy@system76.com>  Thu, 03 Jan 2019 11:39:42 -0700
+
+system76-dkms (1.0.1) bionic; urgency=medium
+
+  * Add galp3-c
+
+ -- Jeremy Soller <jeremy@system76.com>  Wed, 19 Dec 2018 09:43:28 -0700
+
+system76-dkms (1.0.0) bionic; urgency=medium
+
+  * 1.0.0 release
+
+ -- Jeremy Soller <jeremy@system76.com>  Tue, 04 Sep 2018 10:23:09 -0600
+
+system76-dkms (0.0.3) bionic; urgency=medium
+
+  * Add oryp4-b
+
+ -- Jeremy Soller <jeremy@system76.com>  Wed, 16 May 2018 16:00:26 -0600
+
+system76-dkms (0.0.2) bionic; urgency=medium
+
+  * 0.0.2 release.
+
+ -- Jeremy Soller <jeremy@system76.com>  Tue, 08 May 2018 16:21:34 -0600
+
+system76-dkms (0.0.1) artful; urgency=medium
+
+  * Initial release.
+
+ -- Jeremy Soller <jeremy@system76.com>  Wed, 27 Dec 2017 10:50:18 -0700
