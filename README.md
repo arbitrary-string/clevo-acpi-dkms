@@ -85,13 +85,32 @@ cd clevo-acpi-dkms
 ./install.sh
 ```
 
-Safe to re-run. Exports this repo's tracked source into
-`/usr/src/clevo-acpi-<version>/` (a name that can never collide with a real
-`system76-dkms` apt install, if you happen to have one), registers and
-builds it with DKMS under its own package name, and reloads the module.
-Re-running after local source edits picks them up (it removes any prior
-DKMS registration under the same name/version first, since DKMS keys off
-name+version, not file contents).
+Safe to re-run. Exports this repo's *last commit* (via `git archive HEAD`,
+so uncommitted edits aren't picked up) into `/usr/src/clevo-acpi-<version>/`
+(a name that can never collide with a real `system76-dkms` apt install, if
+you happen to have one), registers and builds it with DKMS under its own
+package name, and reloads the module. Re-running after committing local
+changes picks them up (it removes any prior DKMS registration under the
+same name/version first, since DKMS keys off name+version, not file
+contents).
+
+**Upgrading from an older checkout of this repo** (before it merged
+`system76-dkms`'s full source): if you have the `system76-dkms` apt
+package installed, its DKMS registration shares the exact module names
+(`system76`, `clevo-acpi`) this repo now registers independently under
+its own package name. Remove the old one first to avoid the two fighting
+over the same installed files:
+
+```
+sudo dkms remove -m system76 -v <version-from-dkms-status> --all
+sudo apt remove system76-dkms
+```
+
+Then run `./install.sh` as above, and reload once more
+(`sudo rmmod clevo_acpi && sudo modprobe clevo_acpi`) to make sure the
+currently-loaded module matches what actually got installed, not
+whatever `dkms remove` may have restored from an archived backup in the
+process.
 
 ## Adding your board
 
