@@ -1413,4 +1413,4 @@ module_platform_driver(clevo_acpi_driver);
 
 MODULE_DESCRIPTION("Clevo ACPI driver");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("0.2.0");
+MODULE_VERSION("0.3.0");
