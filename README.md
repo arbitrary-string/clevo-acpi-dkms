@@ -85,6 +85,13 @@ cd clevo-acpi-dkms
 ./install.sh
 ```
 
+`install.sh` checks your board against the same DMI whitelist compiled
+into `src/clevo-acpi.c` (both matching mechanisms — System76's own
+vendor+version match and the generic board-name match) before doing
+anything else. If your board isn't recognized, it explains why and
+points you at "Adding your board" below instead of building and
+installing a driver that would just silently refuse to bind.
+
 Safe to re-run. Exports this repo's *last commit* (via `git archive HEAD`,
 so uncommitted edits aren't picked up) into `/usr/src/clevo-acpi-<version>/`
 (a name that can never collide with a real `system76-dkms` apt install, if

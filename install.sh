@@ -19,6 +19,48 @@ PKG_NAME="clevo-acpi"
 PKG_VERSION="$(sed -n 's/^PACKAGE_VERSION="\(.*\)"$/\1/p' "$SCRIPT_DIR/dkms.conf")"
 DKMS_SRC_DIR="/usr/src/${PKG_NAME}-${PKG_VERSION}"
 
+# Mirrors system76_dmi_table[] in src/clevo-acpi.c exactly -- two
+# independent matching mechanisms, not one flat list, so this has to
+# check both DMI fields the way the driver itself does:
+#   - SYSTEM76_DMI(version): sys_vendor == "System76" AND
+#     product_version == <version>, for System76's own branded models.
+#   - BOARD_DMI(board): board_name == <board> directly, for generic/
+#     rebranded Clevo/Tongfang barebones.
+# Keep this list in sync with src/clevo-acpi.c whenever a board is added.
+SYSTEM76_MODELS=("addp6" "lemp14" "lemp14-b" "oryp14")
+GENERIC_BOARDS=("L55xJNP_N_Mx")
+
+BOARD_NAME="$(cat /sys/class/dmi/id/board_name 2>/dev/null || echo unknown)"
+SYS_VENDOR="$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || echo unknown)"
+PRODUCT_VERSION="$(cat /sys/class/dmi/id/product_version 2>/dev/null || echo unknown)"
+
+SUPPORTED=0
+if [ "$SYS_VENDOR" = "System76" ]; then
+	for m in "${SYSTEM76_MODELS[@]}"; do
+		[ "$m" = "$PRODUCT_VERSION" ] && SUPPORTED=1
+	done
+fi
+for b in "${GENERIC_BOARDS[@]}"; do
+	[ "$b" = "$BOARD_NAME" ] && SUPPORTED=1
+done
+
+if [ "$SUPPORTED" != 1 ]; then
+	cat >&2 <<EOF
+This board isn't in the known-supported list, so the compiled driver
+would refuse to bind (clevo_acpi: model does not utilize this driver)
+and this install would do nothing useful. Detected:
+  board_name:      $BOARD_NAME
+  sys_vendor:       $SYS_VENDOR
+  product_version:  $PRODUCT_VERSION
+
+If your board's EC actually speaks the same protocol (check: does
+/sys/bus/acpi/devices/ list CLV0001?), see "Adding your board" in
+README.md to find your own EC's offsets/values and open a PR -- don't
+guess or copy another board's values.
+EOF
+	exit 1
+fi
+
 echo "Installing source to $DKMS_SRC_DIR..."
 sudo rm -rf "$DKMS_SRC_DIR"
 sudo mkdir -p "$DKMS_SRC_DIR"
